@@ -1,9 +1,21 @@
-import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr, Field
+from typing import Optional, List, Any, Dict
+from datetime import datetime
 
-app = FastAPI()
+# Database helpers are pre-configured in this environment
+# - create_document(collection_name, data)
+# - get_documents(collection_name, filter_dict, limit)
+try:
+    from database import create_document, get_documents  # type: ignore
+except Exception as e:  # pragma: no cover
+    create_document = None  # type: ignore
+    get_documents = None  # type: ignore
 
+app = FastAPI(title="CompostPro API", version="1.0.0")
+
+# CORS for frontend integration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,60 +24,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+class Lead(BaseModel):
+    company_name: str = Field(..., min_length=2, max_length=120)
+    contact_name: str = Field(..., min_length=2, max_length=120)
+    email: EmailStr
+    phone: Optional[str] = Field(None, max_length=30)
+    sector: Optional[str] = Field(None, description="Secteur d'activité: EHPAD, GMS, Restauration, Collectivités, etc.")
+    city: Optional[str] = Field(None, max_length=120)
+    waste_volume: Optional[str] = Field(None, description="Volume de biodéchets (kg/semaine)")
+    message: Optional[str] = Field(None, max_length=2000)
+
+
+class LeadOut(Lead):
+    id: Optional[str] = None
+    created_at: Optional[datetime] = None
+
 
 @app.get("/test")
-def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
-    }
-    
+async def test() -> Dict[str, Any]:
+    """Simple connectivity test, including database check if available."""
+    db_ok = False
     try:
-        # Try to import database module
-        from database import db
-        
-        if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+        if get_documents is not None:
+            _ = await get_documents("lead", {}, limit=1)
+            db_ok = True
+    except Exception:
+        db_ok = False
+    return {"status": "ok", "database": db_ok}
+
+
+@app.post("/leads", response_model=Dict[str, Any])
+async def create_lead(lead: Lead):
+    """Store a contact request (lead) into the database."""
+    if create_document is None:
+        raise HTTPException(status_code=500, detail="Database module not available")
+
+    data = lead.dict()
+    try:
+        inserted = await create_document("lead", data)
+        return {"success": True, "id": str(inserted.get("_id", ""))}
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la création: {e}")
 
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.get("/leads", response_model=List[LeadOut])
+async def list_leads(limit: int = 50):
+    """List the most recent leads (for admin/testing)."""
+    if get_documents is None:
+        raise HTTPException(status_code=500, detail="Database module not available")
+    try:
+        docs = await get_documents("lead", filter_dict={}, limit=limit)
+        # Normalize output
+        normalized: List[LeadOut] = []
+        for d in docs:
+            item = {
+                "id": str(d.get("_id")) if d.get("_id") is not None else None,
+                "company_name": d.get("company_name"),
+                "contact_name": d.get("contact_name"),
+                "email": d.get("email"),
+                "phone": d.get("phone"),
+                "sector": d.get("sector"),
+                "city": d.get("city"),
+                "waste_volume": d.get("waste_volume"),
+                "message": d.get("message"),
+                "created_at": d.get("created_at"),
+            }
+            normalized.append(LeadOut(**item))
+        return normalized
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération: {e}")
