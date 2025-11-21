@@ -41,6 +41,11 @@ class LeadOut(Lead):
     created_at: Optional[datetime] = None
 
 
+@app.get("/")
+async def root() -> Dict[str, Any]:
+    return {"message": "CompostPro API running", "version": "1.0.0"}
+
+
 @app.get("/test")
 async def test() -> Dict[str, Any]:
     """Simple connectivity test, including database check if available."""
